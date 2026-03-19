@@ -7,9 +7,10 @@
 #
 # You can redistribute it and/or modify it under the terms of
 # the GNU General Public License version 2.
-#
-CFLAGS=-Wall -O2 -g
-all: livepatch
+# #
+# CFLAGS=-Wall -O2
+
+.PHONY: all clean tfile libfoo.a livepatch testlive
 
 livepatch: livepatch.o
 	$(CC) -o $@ $< -lbfd
@@ -21,7 +22,18 @@ bfd: bfd.o
 	$(CC) -o $@ $< -lbfd
 
 clean:
-	-rm -f *.o
+	-rm -f *.o *.s *.a
+	-rm *.asm
+	-rm *.sect
 	-rm -f livepatch fixup bfd
 
-# EOF
+libfoo.a: libfoo.o
+	$(CC) -shared -fPIC -o $@ $<
+	objdump -D $@ > $@.asm
+	objdump -s $@ > $@.sect
+
+testlive: testlive.o
+	$(CC) -o $@ $<
+	objdump -D $@ > $@.asm
+
+all: livepatch libfoo.a testlive testlive_new
