@@ -344,17 +344,26 @@ int target_symbol_initialize(pid_t pid, char *filename)
 		}
 
 		if (flags[0] == 'r' && flags[2] == 'x' && flags[3] == 'p' &&
-		    pgoff != 0 && ino != 0 && *mfilename != '\0') {
+		    pgoff == 0 && ino != 0 && *mfilename != '\0') {
 			abfd = bfd_openr(mfilename, NULL);
 			if (abfd == NULL) {
 				bfd_perror("bfd_openr");
 				continue;
 			}
 			bfd_check_format(abfd, bfd_object);
-			bfd_read_symbols(abfd, vm_start - pgoff, &symaddrs);
+			bfd_read_symbols(abfd, vm_start, &symaddrs);
 			bfd_close(abfd);
 		}
 	}
+
+	abfd = bfd_openr(filename, NULL);
+	if (abfd == NULL) {
+		bfd_perror("bfd_openr");
+		return -1;
+	}
+	bfd_check_format(abfd, bfd_object);
+	bfd_read_symbols(abfd, 0, &symaddrs);
+	bfd_close(abfd);
 
 	return 0;
 }
