@@ -611,8 +611,8 @@ void parse_data(char *type, char *p, void **vptr, int *vlenp)
 		*vptr = malloc(*vlenp);
 		memcpy(*vptr, p, *vlenp);
 	} else if (strcmp(type, "addr") == 0) {
-		*vptr = (int *)malloc(sizeof(int));
-		*vlenp = sizeof(int);
+		*vptr = malloc(sizeof(SYSTEM_ALIGN_TYPE));
+		*vlenp = sizeof(SYSTEM_ALIGN_TYPE);
 		*(SYSTEM_ALIGN_TYPE *)*vptr = lookup_addr(p);
 	} else if (strcmp(type, "hex") == 0) {
 		int i;
