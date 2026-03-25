@@ -1,16 +1,13 @@
 # Object files & intermediates
 *.o
 *.s
-
+*.so
+*.a
 # Binaries (Makefile targets)
 /livepatch
 /fixup
 /bfd
 /testlive
-
-# Shared library example
-/libfoo.so
-/libfoo.a
 
 # objdump outputs from Makefile
 *.asm

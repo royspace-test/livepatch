@@ -6,7 +6,7 @@ here is example
 2. Using livepatch to attach it
 3. Input command in livepatch
 ```
-dl foo foo.so
+dl foo libfoo.so
 jmp func_J $foo:func1
 q
 ```
@@ -14,15 +14,11 @@ q
 You can see that the executing program has been modified.
 ```
 $ ./testlive
-in func_J
-exit func_J
-in main 3
-in main 12
-in main 12
-in main 12
 ```
 
 ----
+
+Scope: this tree assumes a **Linux x86_64** target built with **GCC** and the usual ELF/glibc toolchain (as in the example `Makefile`). Other compilers or linkers may emit different relocations or symbol strings; if you need a custom toolchain, adapt `livepatch.c` (and build flags) yourself. **Where to change** is summarized in the `/* Toolchain / porting */` comment block near the top of `livepatch.c` (before `struct symaddr *symaddrs`).
 
 This program is based on Fumitoshi UKAI's original (`ukai@debian.or.jp`); see `README_ukai` for details.
 
