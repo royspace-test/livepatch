@@ -58,6 +58,29 @@ int opt_quiet;
 
 /*****************/
 
+/*
+ * Toolchain / porting (default: Linux x86_64, GCC, glibc, standard ELF; see README Scope).
+ *
+ * If you use a custom compiler or non-standard link output, you will usually touch only
+ * the following (pick one or more depending on symptoms):
+ *
+ * - fixup(): resolves relocations by strcmp on names from .dynstr. For typical GCC,
+ *   UND symbols use short names in .dynstr; if your objects use version suffixes in
+ *   strtab or you need a single-pass self-contained fixup, extend here.
+ *
+ * - fixups(): loads .dynsym / .dynstr and applies .rela.dyn and .rela.plt (see PLTREL in
+ *   livepatch-arch.h). If your target uses REL instead of RELA, or different section
+ *   names, change this function and the arch header.
+ *
+ * - bfd_read_symbols(): dynsym then symtab order matches the prepend list. If another
+ *   toolchain needs a different merge order for duplicate names, change the loop order.
+ *
+ * - target_symbol_initialize(): parses /proc/[pid]/maps on Linux; per mapping
+ *   uses offset vm_start - pgoff for bfd_read_symbols (see support_64bit style).
+ *
+ * - livepatch-arch.h: SYSTEM32, ELF class, syscall/register/PLTREL. New CPU ABIs start here.
+ */
+
 /* FIXME: too slow lookup, use hashtable or so */
 struct symaddr *symaddrs;
 
@@ -100,72 +123,82 @@ int bfd_read_symbols(bfd *abfd, SYSTEM_ALIGN_TYPE offset,
 	long i;
 	int ret = 0;
 
-	/* symbol table */
+	/*
+	 * add_symaddr() prepends: last added wins for lookup_symaddr() which
+	 * walks from head. Process dynsym first, then symtab, so symtab
+	 * addresses override dynsym for the same name (dynsym can disagree
+	 * with symtab for local / linker-synthesized symbols on PIE).
+	 */
+	DEBUG("%s(%d): %s offset = %lx\n", __func__, __LINE__,
+	      "DYNAMIC SYMBOL TABLE:", offset);
+	storage_needed = bfd_get_dynamic_symtab_upper_bound(abfd);
+	if (storage_needed < 0) {
+		bfd_perror("bfd_get_dynamic_symtab_upper_bound");
+		ret = -1;
+		goto symtab;
+	}
+	if (storage_needed > 0) {
+		symbol_table = (asymbol **)malloc(storage_needed);
+		number_of_symbols = bfd_canonicalize_dynamic_symtab(abfd,
+								    symbol_table);
+		if (number_of_symbols < 0) {
+			bfd_perror("bfd_canonicalize_dynamic_symtab");
+			ret = -1;
+			free(symbol_table);
+			symbol_table = NULL;
+			goto symtab;
+		}
+		for (i = 0; i < number_of_symbols; i++) {
+			asymbol *asym = symbol_table[i];
+			const char *sym_name = bfd_asymbol_name(asym);
+			int symclass = bfd_decode_symclass(asym);
+			long sym_value = bfd_asymbol_value(asym) + offset;
+
+			if (*sym_name == '\0')
+				continue;
+			if (bfd_is_undefined_symclass(symclass))
+				continue;
+			DEBUG(" %s=%p\n", sym_name, (void *)sym_value);
+			add_symaddr(sym_name, sym_value, symaddrp);
+		}
+		free(symbol_table);
+		symbol_table = NULL;
+	} else {
+		DEBUG("%s\n", "no dynamic symbols");
+	}
+
+symtab:
 	DEBUG("%s(%d): %s offset = %lx\n", __func__, __LINE__,
 	      "SYMBOL TABLE:", offset);
 	storage_needed = bfd_get_symtab_upper_bound(abfd);
 	if (storage_needed < 0) {
 		bfd_perror("bfd_get_symtab_upper_bound");
 		ret = -1;
-		goto dynsym;
+		goto out;
 	}
 	if (storage_needed == 0) {
 		DEBUG("%s\n", "no symbols");
-		goto dynsym;
+		goto out;
 	}
 	symbol_table = (asymbol **)malloc(storage_needed);
 	number_of_symbols = bfd_canonicalize_symtab(abfd, symbol_table);
 	if (number_of_symbols < 0) {
 		bfd_perror("bfd_canonicalize_symtab");
 		ret = -1;
-		goto dynsym;
+		goto out;
 	}
 	for (i = 0; i < number_of_symbols; i++) {
 		asymbol *asym = symbol_table[i];
 		const char *sym_name = bfd_asymbol_name(asym);
 		int symclass = bfd_decode_symclass(asym);
 		long sym_value = bfd_asymbol_value(asym) + offset;
+
 		if (*sym_name == '\0')
 			continue;
 		if (bfd_is_undefined_symclass(symclass))
 			continue;
 		DEBUG("%s(%d): %s=%p\n", __func__, __LINE__, sym_name,
 		      (void *)sym_value);
-		add_symaddr(sym_name, sym_value, symaddrp);
-	}
-dynsym:
-	if (symbol_table)
-		free(symbol_table);
-	symbol_table = NULL;
-
-	DEBUG("%s\n", "DYNAMIC SYMBOL TABLE:");
-	storage_needed = bfd_get_dynamic_symtab_upper_bound(abfd);
-	if (storage_needed < 0) {
-		bfd_perror("bfd_get_dynamic_symtab_upper_bound");
-		ret = -1;
-		goto out;
-	}
-	if (storage_needed == 0) {
-		DEBUG("%s\n", "no symbols");
-		goto out;
-	}
-	symbol_table = (asymbol **)malloc(storage_needed);
-	number_of_symbols = bfd_canonicalize_dynamic_symtab(abfd, symbol_table);
-	if (number_of_symbols < 0) {
-		bfd_perror("bfd_canonicalize_symtab");
-		ret = -1;
-		goto out;
-	}
-	for (i = 0; i < number_of_symbols; i++) {
-		asymbol *asym = symbol_table[i];
-		const char *sym_name = bfd_asymbol_name(asym);
-		int symclass = bfd_decode_symclass(asym);
-		long sym_value = bfd_asymbol_value(asym) + offset;
-		if (*sym_name == '\0')
-			continue;
-		if (bfd_is_undefined_symclass(symclass))
-			continue;
-		DEBUG(" %s=%p\n", sym_name, (void *)sym_value);
 		add_symaddr(sym_name, sym_value, symaddrp);
 	}
 out:
@@ -203,6 +236,12 @@ void fixup(bfd *abfd, ElfW(Sym) * symtab, char *strtab, PLTREL *reloc,
 	rel_addr = reloc->r_offset;
 	sym_name = &strtab[sym->st_name];
 	INFO("%s @ %ld 0x%lx ", sym_name, rel_addr, rel_addr);
+	/*
+	 * Typical GCC: first fixups(symaddrs) already wrote libc UND slots into outbuf;
+	 * second pass symaddr0 only lists the mmap'd object, so libc lookups fail, but
+	 * we only write when if(addr) — no overwrite. Non-standard strtab or single-pass
+	 * fixups: see "Toolchain / porting" at the top of this file.
+	 */
 	addr = lookup_symaddr(sym_name, symaddr0);
 	if (addr) {
 		*(SYSTEM_ALIGN_TYPE *)(outbuf + rel_addr) = addr;
@@ -221,6 +260,7 @@ int fixups(bfd *abfd, struct symaddr *symaddr0, unsigned char *outbuf,
 	PLTREL *reloc, *reloc_end;
 	int reloc_size;
 
+	/* Standard ELF x86_64: .dynsym + .dynstr + .rela.dyn + .rela.plt; other ABIs: see porting block */
 	DEBUG("%s...\n", "fixups");
 	symtab = (ElfW(Sym) *)bfd_load_section(abfd, ".dynsym", NULL);
 	if (symtab == NULL) {
@@ -284,6 +324,7 @@ void bfd_map_section_buf(bfd *abfd, asection *sect, void *obj)
 	}
 }
 
+/* Linux: read /proc/[pid]/maps. Non-Linux: replace; see "Toolchain / porting" at file top. */
 int target_symbol_initialize(pid_t pid, char *filename)
 {
 	bfd *abfd;
@@ -300,14 +341,16 @@ int target_symbol_initialize(pid_t pid, char *filename)
 		return -1;
 	}
 	while (fgets(buf, sizeof(buf), fp) != NULL) {
-		/* linux/fs/proc/task_mmu.c — see proc_pid_maps(5) */
+		/* linux/fs/proc/task_mmu.c — same spirit as support_64bit branch */
 		SYSTEM_ALIGN_TYPE vm_start, vm_end;
 		int pgoff, major, minor, ino;
 		char flags[5], mfilename[4096];
+
 		if (sscanf(buf, "%lx-%lx %4s %x %d:%x %d %s", &vm_start,
 			   &vm_end, flags, &pgoff, &major, &minor, &ino,
-			   mfilename) < 8) {
+			   mfilename) < 7) {
 			ERROR("E: invalid format in /proc/$$/maps? %s\n", buf);
+			ERROR("E: invalid format in /proc/$$/maps? %d\n", ino);
 			continue;
 		}
 
@@ -322,25 +365,13 @@ int target_symbol_initialize(pid_t pid, char *filename)
 				bfd_close(abfd);
 				continue;
 			}
-			bfd_read_symbols(abfd, vm_start, &symaddrs);
+			bfd_read_symbols(abfd, vm_start - (SYSTEM_ALIGN_TYPE)pgoff,
+					 &symaddrs);
 			bfd_close(abfd);
 		}
 	}
 
 	fclose(fp);
-
-	abfd = bfd_openr(filename, NULL);
-	if (abfd == NULL) {
-		bfd_perror("bfd_openr");
-		return -1;
-	}
-	if (!bfd_check_format(abfd, bfd_object)) {
-		bfd_close(abfd);
-		return -1;
-	}
-	bfd_read_symbols(abfd, 0, &symaddrs);
-	bfd_close(abfd);
-
 	return 0;
 }
 
@@ -358,7 +389,8 @@ long target_alloc(pid_t pid, size_t siz)
 {
 	struct user_regs_struct regs, oregs;
 	SYSTEM_ALIGN_TYPE lv;
-	size_t bk_code;
+	unsigned long bk_code;
+	long pk;
 
 	if (ptrace(PTRACE_GETREGS, pid, NULL, &oregs) < 0) {
 		perror("ptrace getregs");
@@ -367,10 +399,17 @@ long target_alloc(pid_t pid, size_t siz)
 
 	regs = oregs;
 	DEBUG("%s(%d): %%rsp = %p\n", __func__, __LINE__, (void *)regs.rsp);
-	if ((bk_code = ptrace(PTRACE_PEEKDATA, pid, (regs.rip), NULL)) < 0) {
-		perror("ptrace get rip fail");
+	/*
+	 * PTRACE_PEEKDATA returns the memory word; -1 is ambiguous (error vs
+	 * data 0xff..ff). Use errno: man ptrace recommends errno=0 before call.
+	 */
+	errno = 0;
+	pk = ptrace(PTRACE_PEEKDATA, pid, (void *)oregs.rip, NULL);
+	if (pk == -1 && errno != 0) {
+		perror("ptrace peek rip");
 		return 0;
 	}
+	bk_code = (unsigned long)pk;
 #if SYSTEM32
 	regs.rsp -= sizeof(int);
 	memcpy(&lv, code, 4);
@@ -427,8 +466,10 @@ long target_alloc(pid_t pid, size_t siz)
 
 	DEBUG("%s(%d): target_alloc %s\n", __func__, __LINE__,
 	      "PTRACE_POKEDATA");
-	if (ptrace(PTRACE_POKEDATA, pid, regs.rip, 0x050f) <
-	    0) { /* syscall = 0f05 */
+	errno = 0;
+	if (ptrace(PTRACE_POKEDATA, pid, (void *)regs.rip,
+		   (void *)(uintptr_t)(unsigned long)0x050f) == -1 &&
+	    errno != 0) { /* syscall = 0f 05 */
 		perror("ptrace PTRACE_POKEDATA");
 		return 0;
 	}
@@ -456,7 +497,9 @@ long target_alloc(pid_t pid, size_t siz)
 	INFO("allocated = %p %ld bytes\n", (void *)lv, siz);
 
 	/* restore old regs */
-	if (ptrace(PTRACE_POKEDATA, pid, oregs.rip, bk_code) < 0) {
+	errno = 0;
+	if (ptrace(PTRACE_POKEDATA, pid, (void *)oregs.rip,
+		   (void *)(uintptr_t)bk_code) == -1 && errno != 0) {
 		perror("ptrace restore rip");
 		return 0;
 	}
@@ -493,6 +536,7 @@ int set_data(pid_t pid, SYSTEM_ALIGN_TYPE addr, void *val, int vlen)
 			       addr0 + i * sizeof(SYSTEM_ALIGN_TYPE), NULL);
 		if (lv[i] == -1 && errno != 0) {
 			ERROR("ptrace peek(%d) (%d)\n", i, errno);
+			free(lv);
 			return -1;
 		}
 		DEBUG("%08lx ", lv[i]);
@@ -507,12 +551,14 @@ int set_data(pid_t pid, SYSTEM_ALIGN_TYPE addr, void *val, int vlen)
 		if (ptrace(PTRACE_POKEDATA, pid,
 			   addr0 + i * sizeof(SYSTEM_ALIGN_TYPE), lv[i]) < 0) {
 			perror("ptrace poke");
+			free(lv);
 			return -1;
 		}
 		DEBUG("%08lx ", lv[i]);
 	}
 	DEBUG("%s", "\n"); /* XXX */
 
+	free(lv);
 	return 0;
 }
 
@@ -706,13 +752,53 @@ void set_jmp_cmd(pid_t pid, SYSTEM_ALIGN_TYPE ofunc_addr,
 	unsigned char jmp_rax[2] = { 0xFF, 0xE0 };
 
 	unsigned char code[16];
+	unsigned long low, high;
+	long pk;
+
 	memcpy(code, endbr64, sizeof(endbr64));
 	memcpy(code + sizeof(endbr64), mov_rax, sizeof(mov_rax));
 	memcpy(code + sizeof(endbr64) + sizeof(mov_rax), jmp_rax,
 	       sizeof(jmp_rax));
 
-	ptrace(PTRACE_POKETEXT, pid, ofunc_addr, *(long *)&code[0]);
-	ptrace(PTRACE_POKETEXT, pid, ofunc_addr + 8, *(long *)&code[8]);
+	memcpy(&low, code, sizeof(low));
+	memcpy(&high, code + 8, sizeof(high));
+
+	errno = 0;
+	if (ptrace(PTRACE_POKEDATA, pid, (void *)ofunc_addr,
+		   (void *)(uintptr_t)low) == -1 && errno != 0) {
+		perror("ptrace POKEDATA jmp patch [0:7]");
+		return;
+	}
+	errno = 0;
+	if (ptrace(PTRACE_POKEDATA, pid, (void *)(ofunc_addr + 8),
+		   (void *)(uintptr_t)high) == -1 && errno != 0) {
+		perror("ptrace POKEDATA jmp patch [8:15]");
+		return;
+	}
+
+	/* Verify text was written (ptrace can "succeed" yet leave stale icache on rare setups). */
+	errno = 0;
+	pk = ptrace(PTRACE_PEEKDATA, pid, (void *)ofunc_addr, NULL);
+	if (pk == -1 && errno != 0) {
+		perror("ptrace peek jmp patch verify [0:7]");
+		return;
+	}
+	if ((unsigned long)pk != low) {
+		fprintf(stderr,
+			"livepatch: jmp patch verify failed @%p: wrote 0x%lx read 0x%lx\n",
+			(void *)ofunc_addr, low, (unsigned long)pk);
+	}
+	errno = 0;
+	pk = ptrace(PTRACE_PEEKDATA, pid, (void *)(ofunc_addr + 8), NULL);
+	if (pk == -1 && errno != 0) {
+		perror("ptrace peek jmp patch verify [8:15]");
+		return;
+	}
+	if ((unsigned long)pk != high) {
+		fprintf(stderr,
+			"livepatch: jmp patch verify failed @%p: wrote 0x%lx read 0x%lx\n",
+			(void *)(ofunc_addr + 8), high, (unsigned long)pk);
+	}
 }
 
 int main(int argc, char *argv[])
@@ -779,6 +865,21 @@ int main(int argc, char *argv[])
      * see help()
      */
 	while (fgets(buf, sizeof(buf), stdin) != NULL) {
+		char *s;
+		/* Drop CR (paste from Windows), skip blank / whitespace-only lines */
+		for (s = buf; *s; s++)
+			if (*s == '\r')
+				*s = '\n';
+		s = buf;
+		while (*s == ' ' || *s == '\t')
+			s++;
+		if (*s == '\n' || *s == '\0')
+			continue;
+		if (*s == '#')
+			continue;
+		if (s != buf)
+			memmove(buf, s, strlen(s) + 1);
+
 		DEBUG("I: %s", buf);
 		if (strncmp(buf, "set ", 4) == 0) {
 			char addrinfo[4096];
@@ -974,6 +1075,15 @@ int main(int argc, char *argv[])
 			INFO("%s(%d):jmp pid=%d addr=%p(%p) addr2=%p\n",
 			     __func__, __LINE__, target_pid, (void *)o_addr,
 			     (void *)base_addr, (void *)n_addr);
+			if (o_addr == 0 || n_addr == 0) {
+				ERROR("jmp: bad address o_addr=%p n_addr=%p "
+				      "(symbol not resolved?)\n",
+				      (void *)o_addr, (void *)n_addr);
+				continue;
+			}
+			fprintf(stderr, "livepatch: jmp %s@%p -> %s@%p\n",
+				addrinfo, (void *)o_addr, addr2info,
+				(void *)n_addr);
 
 #if SYSTEM32
 			long jmp_relative;
