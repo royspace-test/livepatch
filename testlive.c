@@ -20,7 +20,7 @@ int main()
 		sleep(3);
 		printf("In main get calculating result: %d\n", a);
 		if (12 == a) {
-			printf("=== You fix it !!! (%d)\n ===", a);
+			printf("=== You fix it !!! (%d) ===\n", a);
 			break;
 		} else {
 			printf("=== No, this is not the right answer....(%d) ===\n",
