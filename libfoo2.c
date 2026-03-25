@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-int func1(int a, int b)
+int func2(int a, int b)
 {
 	printf("in %s fixup\n", __func__);
 	sleep(2);
